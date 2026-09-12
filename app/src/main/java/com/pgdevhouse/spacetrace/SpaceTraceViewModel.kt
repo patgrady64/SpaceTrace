@@ -7,11 +7,23 @@ import androidx.lifecycle.viewModelScope
 import com.pgdevhouse.spacetrace.data.StorageRepository
 import com.pgdevhouse.spacetrace.model.*
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileInputStream
+import java.security.MessageDigest
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+data class DuplicateGroup(val hash: String, val files: List<StorageNode>) {
+    val fileSizeBytes: Long get() = files.firstOrNull()?.totalSizeBytes ?: 0L
+    val reclaimableBytes: Long get() = fileSizeBytes * (files.size - 1).coerceAtLeast(0)
+}
 
 data class SpaceTraceUiState(
     val permissionGranted: Boolean = false,
@@ -33,7 +45,11 @@ data class SpaceTraceUiState(
     val lastScanDurationMs: Long = 0L,
     val lastScanFiles: Int = 0,
     val lastScanFolders: Int = 0,
-    val message: String? = null
+    val message: String? = null,
+    val duplicateGroups: List<DuplicateGroup> = emptyList(),
+    val findingDuplicates: Boolean = false,
+    val duplicateFilesHashed: Int = 0,
+    val duplicateCandidates: Int = 0
 )
 
 class SpaceTraceViewModel(application: Application) : AndroidViewModel(application) {
@@ -41,6 +57,7 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
     private val _uiState = MutableStateFlow(SpaceTraceUiState())
     val uiState: StateFlow<SpaceTraceUiState> = _uiState.asStateFlow()
     private var scanJob: Job? = null
+    private var duplicateJob: Job? = null
 
     init { refreshAccess() }
 
@@ -203,6 +220,67 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
         visit(start)
         return results.sortedByDescending { it.totalSizeBytes }.take(500)
     }
+
+
+    fun findDuplicates() {
+        val root = _uiState.value.root ?: return
+        duplicateJob?.cancel()
+        duplicateJob = viewModelScope.launch {
+            _uiState.update { it.copy(findingDuplicates = true, duplicateGroups = emptyList(), duplicateFilesHashed = 0, duplicateCandidates = 0) }
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val files = mutableListOf<StorageNode>()
+                    fun collect(node: StorageNode) {
+                        if (node.isDirectory) node.children.forEach(::collect) else if (node.totalSizeBytes > 0L) files += node
+                    }
+                    collect(root)
+                    val candidates = files.groupBy { it.totalSizeBytes }.values.filter { it.size > 1 }.flatten()
+                    _uiState.update { it.copy(duplicateCandidates = candidates.size) }
+                    val byHash = linkedMapOf<String, MutableList<StorageNode>>()
+                    candidates.forEachIndexed { index, node ->
+                        coroutineContext.ensureActive()
+                        val hash = sha256(File(node.displayPath)) ?: return@forEachIndexed
+                        byHash.getOrPut(hash) { mutableListOf() } += node
+                        _uiState.update { it.copy(duplicateFilesHashed = index + 1) }
+                    }
+                    byHash.mapNotNull { (hash, nodes) -> nodes.takeIf { it.size > 1 }?.let { DuplicateGroup(hash, it.sortedBy { n -> n.displayPath.lowercase() }) } }
+                        .sortedByDescending { it.reclaimableBytes }
+                }
+            }.onSuccess { groups -> _uiState.update { it.copy(findingDuplicates = false, duplicateGroups = groups) } }
+             .onFailure { error ->
+                 if (error is kotlinx.coroutines.CancellationException) return@onFailure
+                 _uiState.update { it.copy(findingDuplicates = false, message = error.message ?: "Duplicate scan failed.") }
+             }
+        }
+    }
+
+    fun cancelDuplicateScan() { duplicateJob?.cancel(); _uiState.update { it.copy(findingDuplicates = false, message = "Duplicate scan cancelled.") } }
+    fun clearDuplicateResults() = _uiState.update { it.copy(duplicateGroups = emptyList()) }
+
+    fun deleteDuplicateFiles(nodes: List<StorageNode>) {
+        if (nodes.isEmpty()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(deleting = true) }
+            var deleted = 0
+            nodes.distinctBy { it.uri }.forEach { if (repository.delete(it.uri)) deleted++ }
+            _uiState.update { it.copy(deleting = false, duplicateGroups = emptyList(), message = "Deleted $deleted of ${nodes.size} selected duplicate files.") }
+            rescan()
+        }
+    }
+
+    private suspend fun sha256(file: File): String? = runCatching {
+        val digest = MessageDigest.getInstance("SHA-256")
+        FileInputStream(file).use { input ->
+            val buffer = ByteArray(256 * 1024)
+            while (true) {
+                coroutineContext.ensureActive()
+                val count = input.read(buffer)
+                if (count <= 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }.getOrNull()
 
     fun selectedNodes(): List<StorageNode> = _uiState.value.selected.mapNotNull { findNode(_uiState.value.root, it) }
     fun deleteNode(node: StorageNode) {

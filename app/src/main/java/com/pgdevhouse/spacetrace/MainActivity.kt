@@ -2,6 +2,7 @@ package com.pgdevhouse.spacetrace
 
 import android.Manifest
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -14,6 +15,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -38,6 +41,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -67,14 +71,27 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.InsertDriveFile
+import androidx.compose.material.icons.rounded.AudioFile
+import androidx.compose.material.icons.rounded.VideoFile
+import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Archive
+import androidx.compose.material.icons.rounded.Android
 import com.pgdevhouse.spacetrace.model.FileCategory
 import com.pgdevhouse.spacetrace.model.SortMode
 import com.pgdevhouse.spacetrace.model.StorageLocation
@@ -125,6 +142,9 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
     var treemapDetails by remember { mutableStateOf<StorageNode?>(null) }
     var fileManagerNode by remember { mutableStateOf<StorageNode?>(null) }
     var deleteNode by remember { mutableStateOf<StorageNode?>(null) }
+    var showDuplicates by remember { mutableStateOf(false) }
+    var duplicatePreview by remember { mutableStateOf<StorageNode?>(null) }
+    val duplicateSelections = remember { mutableStateMapOf<String, Boolean>() }
     val context = androidx.compose.ui.platform.LocalContext.current
     val openInFileManager: (StorageNode) -> Unit = { node ->
         val folderPath = if (node.isDirectory) node.displayPath else node.displayPath.substringBeforeLast('/', node.displayPath)
@@ -263,6 +283,11 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
                         )
                     }
                     ScanSummary(state.lastScanFiles, state.lastScanFolders, root.totalSizeBytes, state.lastScanDurationMs)
+                    OutlinedButton(
+                        onClick = { duplicateSelections.clear(); showDuplicates = true; viewModel.findDuplicates() },
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        enabled = !state.findingDuplicates
+                    ) { Text("Find duplicate files") }
                     OutlinedTextField(
                         value = state.searchQuery,
                         onValueChange = viewModel::setSearchQuery,
@@ -430,6 +455,73 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
         )
     }
 
+    if (showDuplicates) {
+        Dialog(
+            onDismissRequest = { if (!state.findingDuplicates) { showDuplicates = false; viewModel.clearDuplicateResults() } },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                Column(Modifier.fillMaxSize().padding(16.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column {
+                            Text("Duplicate files", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                            val reclaimable = state.duplicateGroups.sumOf { it.reclaimableBytes }
+                            if (!state.findingDuplicates) Text("${state.duplicateGroups.size} groups • ${reclaimable.formatBytes()} potentially reclaimable", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(onClick = { if (state.findingDuplicates) viewModel.cancelDuplicateScan() else { showDuplicates = false; viewModel.clearDuplicateResults() } }) {
+                            Text(if (state.findingDuplicates) "Cancel" else "Close")
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    if (state.findingDuplicates) {
+                        val total = state.duplicateCandidates
+                        Text(if (total == 0) "Finding same-size candidates…" else "Verifying ${state.duplicateFilesHashed} of $total candidate files…")
+                        Spacer(Modifier.height(8.dp))
+                        if (total > 0) LinearProgressIndicator(progress = { state.duplicateFilesHashed.toFloat() / total.coerceAtLeast(1) }, modifier = Modifier.fillMaxWidth())
+                        else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Text("Files are SHA-256 verified before they are called duplicates.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 10.dp))
+                    } else {
+                        val selectedNodes = state.duplicateGroups.flatMap { it.files }.filter { duplicateSelections[it.uri.toString()] == true }
+                        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            items(state.duplicateGroups, key = { it.hash }) { group ->
+                                DuplicateGroupCard(group, duplicateSelections, onPreview = { duplicatePreview = it }, onLongPress = { fileManagerNode = it })
+                            }
+                            if (state.duplicateGroups.isEmpty()) item { Text("No exact duplicate files found.", modifier = Modifier.padding(vertical = 28.dp)) }
+                        }
+                        if (selectedNodes.isNotEmpty()) {
+                            Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+                                Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    Text("${selectedNodes.size} selected • ${selectedNodes.sumOf { it.totalSizeBytes }.formatBytes()}", fontWeight = FontWeight.SemiBold)
+                                    Button(onClick = { viewModel.deleteDuplicateFiles(selectedNodes); duplicateSelections.clear(); showDuplicates = false }) { Text("Delete selected") }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    duplicatePreview?.let { node ->
+        Dialog(onDismissRequest = { duplicatePreview = null }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            Surface(Modifier.fillMaxSize(), color = Color.Black) {
+                Box(Modifier.fillMaxSize()) {
+                    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, node.displayPath) {
+                        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { BitmapFactory.decodeFile(node.displayPath) }
+                    }
+                    bitmap?.let { Image(it.asImageBitmap(), contentDescription = node.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+                    TextButton(onClick = { duplicatePreview = null }, modifier = Modifier.align(Alignment.TopEnd).padding(16.dp)) { Text("Close", color = Color.White) }
+                    Surface(color = Color.Black.copy(alpha = 0.72f), modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp)) {
+                            Text(node.name, color = Color.White, fontWeight = FontWeight.Bold)
+                            Text("${node.totalSizeBytes.formatBytes()} • ${node.displayPath}", color = Color.White, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if (confirmDelete) {
         val selectedNodes = viewModel.selectedNodes()
         val selectedFolders = selectedNodes.count { it.isDirectory }
@@ -457,6 +549,64 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } }
         )
+    }
+}
+
+@Composable
+private fun DuplicateGroupCard(
+    group: DuplicateGroup,
+    selections: MutableMap<String, Boolean>,
+    onPreview: (StorageNode) -> Unit,
+    onLongPress: (StorageNode) -> Unit
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("${group.files.size} identical copies", fontWeight = FontWeight.Bold)
+            Text("${group.fileSizeBytes.formatBytes()} each • ${group.reclaimableBytes.formatBytes()} reclaimable if one copy is kept", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            group.files.forEach { node ->
+                val key = node.uri.toString()
+                Row(
+                    Modifier.fillMaxWidth().combinedClickable(onClick = { if (node.category == FileCategory.IMAGE) onPreview(node) }, onLongClick = { onLongPress(node) }).padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    DuplicateVisual(node, onPreview)
+                    Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+                        Text(node.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(node.displayPath, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text("${node.category.label.removeSuffix("s")} • ${node.totalSizeBytes.formatBytes()} • ${formatTimestamp(node.lastModified)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Checkbox(checked = selections[key] == true, onCheckedChange = { selections[key] = it })
+                }
+                HorizontalDivider()
+            }
+        }
+    }
+}
+
+@Composable
+private fun DuplicateVisual(node: StorageNode, onPreview: (StorageNode) -> Unit) {
+    if (node.category == FileCategory.IMAGE) {
+        val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, node.displayPath) {
+            value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = 8 }
+                BitmapFactory.decodeFile(node.displayPath, options)
+            }
+        }
+        Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.size(64.dp).combinedClickable(onClick = { onPreview(node) }, onLongClick = {})) {
+            bitmap?.let { Image(it.asImageBitmap(), contentDescription = node.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
+        }
+    } else {
+        val icon = when (node.category) {
+            FileCategory.AUDIO -> Icons.Rounded.AudioFile
+            FileCategory.VIDEO -> Icons.Rounded.VideoFile
+            FileCategory.DOCUMENT -> Icons.Rounded.Description
+            FileCategory.ARCHIVE -> Icons.Rounded.Archive
+            FileCategory.APK -> Icons.Rounded.Android
+            else -> Icons.Rounded.InsertDriveFile
+        }
+        Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.size(64.dp)) {
+            Box(contentAlignment = Alignment.Center) { Icon(icon, contentDescription = node.category.label, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp)) }
+        }
     }
 }
 

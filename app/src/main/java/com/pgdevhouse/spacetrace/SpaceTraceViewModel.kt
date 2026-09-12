@@ -122,6 +122,8 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
     fun cancelScan() { scanJob?.cancel(); _uiState.update { it.copy(scanning = false, message = "Scan cancelled.") } }
     fun setCategory(category: FileCategory) = _uiState.update { it.copy(category = category) }
     fun setSortMode(sortMode: SortMode) = _uiState.update { it.copy(sortMode = sortMode) }
+    fun showMessage(message: String) = _uiState.update { it.copy(message = message) }
+
     fun dismissMessage() = _uiState.update { it.copy(message = null) }
     fun toggleSelected(uri: Uri) = _uiState.update { state -> val next = state.selected.toMutableSet().apply { if (!add(uri)) remove(uri) }; state.copy(selected = next) }
     fun clearSelection() = _uiState.update { it.copy(selected = emptySet()) }
@@ -137,6 +139,22 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
         val stack = state.pathStack.dropLast(1)
         _uiState.update { it.copy(pathStack = stack, currentFolderUri = stack.last(), selected = emptySet()) }
         return true
+    }
+    fun returnToStorageSelection() {
+        scanJob?.cancel()
+        _uiState.update {
+            it.copy(
+                scanStarted = false,
+                root = null,
+                currentFolderUri = null,
+                pathStack = emptyList(),
+                capacity = null,
+                scanning = false,
+                progress = ScanProgress(),
+                selected = emptySet(),
+                deleting = false
+            )
+        }
     }
     fun currentFolder(): StorageNode? = findNode(_uiState.value.root, _uiState.value.currentFolderUri)
     fun visibleChildren(): List<StorageNode> = sortAndFilter(currentFolder()?.children.orEmpty(), true)

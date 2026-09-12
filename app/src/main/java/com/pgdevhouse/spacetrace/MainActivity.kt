@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.provider.DocumentsContract
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -40,6 +41,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -83,13 +86,13 @@ class MainActivity : ComponentActivity() {
 }
 
 private val colors = darkColorScheme(
-    primary = Color(0xFF5BE0A4),
-    onPrimary = Color(0xFF062116),
-    background = Color(0xFF0E1512),
-    surface = Color(0xFF17201C),
-    surfaceVariant = Color(0xFF223029),
-    onBackground = Color(0xFFE5F1EA),
-    onSurface = Color(0xFFE5F1EA)
+    primary = Color(0xFFFF5252),
+    onPrimary = Color(0xFF2B0000),
+    background = Color(0xFF121010),
+    surface = Color(0xFF1D1818),
+    surfaceVariant = Color(0xFF2A2020),
+    onBackground = Color(0xFFF5EAEA),
+    onSurface = Color(0xFFF5EAEA)
 )
 
 @Composable
@@ -103,9 +106,39 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
     val state by viewModel.uiState.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     var confirmDelete by remember { mutableStateOf(false) }
-    var showTreemap by remember { mutableStateOf(false) }
+    var showTreemap by remember { mutableStateOf(true) }
     var treemapDetails by remember { mutableStateOf<StorageNode?>(null) }
+    var fileManagerNode by remember { mutableStateOf<StorageNode?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
+    val openInFileManager: (StorageNode) -> Unit = { node ->
+        val folderPath = if (node.isDirectory) {
+            node.displayPath
+        } else {
+            node.displayPath.substringBeforeLast('/', node.displayPath)
+        }
+        val folderUri = externalStorageDocumentUriForPath(folderPath)
+        if (folderUri == null) {
+            viewModel.showMessage("This location cannot be opened by an Android file manager.")
+        } else {
+            // ACTION_OPEN_DOCUMENT_TREE is the Android-supported way to open a folder location.
+            // EXTRA_INITIAL_URI asks the selected DocumentsUI/file-provider implementation to
+            // start at the folder instead of silently falling back to SpaceTrace's Details dialog.
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                putExtra(DocumentsContract.EXTRA_INITIAL_URI, folderUri)
+                addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+                )
+            }
+            runCatching {
+                context.startActivity(Intent.createChooser(intent, "Open in file manager"))
+            }.onFailure {
+                viewModel.showMessage("No compatible file manager was found.")
+            }
+        }
+    }
     val settingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         viewModel.refreshAccess()
         viewModel.startSelectedScan()
@@ -129,7 +162,10 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
         }
     }
 
-    BackHandler(enabled = state.pathStack.size > 1) { viewModel.navigateUp() }
+    BackHandler(enabled = state.scanStarted && !state.scanning) {
+        if (state.pathStack.size > 1) viewModel.navigateUp()
+        else viewModel.returnToStorageSelection()
+    }
     LaunchedEffect(state.message) {
         state.message?.let {
             snackbar.showSnackbar(it)
@@ -210,7 +246,12 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
                         if (folders.isEmpty()) {
                             Text("No subfolders", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 12.dp))
                         } else {
-                            TreemapView(nodes = folders, onNodeTap = { viewModel.openFolder(it.uri) })
+                            TreemapView(
+                                nodes = folders,
+                                height = if (state.pathStack.size > 1) 140.dp else 280.dp,
+                                onNodeTap = { viewModel.openFolder(it.uri) },
+                                onNodeLongPress = { fileManagerNode = it }
+                            )
                         }
                         Spacer(Modifier.height(10.dp))
                         Text("Files in this folder", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 6.dp))
@@ -222,7 +263,7 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
                                     selected = false,
                                     selectionActive = false,
                                     onOpen = { treemapDetails = node },
-                                    onSelect = { treemapDetails = node }
+                                    onSelect = { fileManagerNode = node }
                                 )
                             }
                             if (files.isEmpty()) item { Text("No files in this folder.", modifier = Modifier.padding(vertical = 16.dp)) }
@@ -249,6 +290,25 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
                 if (state.root == null) Text("No readable storage volume was found.", modifier = Modifier.padding(vertical = 24.dp))
             }
         }
+    }
+
+    fileManagerNode?.let { node ->
+        AlertDialog(
+            onDismissRequest = { fileManagerNode = null },
+            title = { Text(node.name) },
+            text = {
+                Text(if (node.isDirectory) "Folder actions" else "File actions")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    fileManagerNode = null
+                    openInFileManager(node)
+                }) {
+                    Text(if (node.isDirectory) "Open in file manager" else "Open containing folder")
+                }
+            },
+            dismissButton = { TextButton(onClick = { fileManagerNode = null }) { Text("Cancel") } }
+        )
     }
 
     treemapDetails?.let { node ->
@@ -426,9 +486,15 @@ private fun FilterRow(selected: FileCategory, onSelected: (FileCategory) -> Unit
 
 @Composable
 private fun ViewModeRow(showTreemap: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        FilterChip(selected = !showTreemap, onClick = { onChange(false) }, label = { Text("List") })
-        FilterChip(selected = showTreemap, onClick = { onChange(true) }, label = { Text("Heatmap") })
+    Row(
+        Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        horizontalArrangement = Arrangement.End
+    ) {
+        FilterChip(
+            selected = showTreemap,
+            onClick = { onChange(!showTreemap) },
+            label = { Text(if (showTreemap) "Hide heatmap" else "Show heatmap") }
+        )
     }
 }
 
@@ -465,12 +531,17 @@ private fun treemapRects(nodes: List<StorageNode>, width: Float, height: Float):
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun TreemapView(nodes: List<StorageNode>, onNodeTap: (StorageNode) -> Unit) {
+private fun TreemapView(
+    nodes: List<StorageNode>,
+    height: androidx.compose.ui.unit.Dp,
+    onNodeTap: (StorageNode) -> Unit,
+    onNodeLongPress: (StorageNode) -> Unit
+) {
     if (nodes.none { it.totalSizeBytes > 0 }) {
         Text("No sized items to map.", modifier = Modifier.padding(vertical = 24.dp))
         return
     }
-    BoxWithConstraints(Modifier.fillMaxWidth().height(260.dp)) {
+    BoxWithConstraints(Modifier.fillMaxWidth().height(height)) {
         val rects = remember(nodes, maxWidth, maxHeight) {
             treemapRects(nodes, maxWidth.value, maxHeight.value)
         }
@@ -489,7 +560,7 @@ private fun TreemapView(nodes: List<StorageNode>, onNodeTap: (StorageNode) -> Un
                     .width(rect.width.dp.coerceAtLeast(1.dp))
                     .height(rect.height.dp.coerceAtLeast(1.dp))
                     .padding(1.dp)
-                    .combinedClickable(onClick = { onNodeTap(rect.node) }, onLongClick = { onNodeTap(rect.node) })
+                    .combinedClickable(onClick = { onNodeTap(rect.node) }, onLongClick = { onNodeLongPress(rect.node) })
             ) {
                 if (rect.width >= 54f && rect.height >= 34f) {
                     Column(Modifier.padding(5.dp)) {
@@ -539,6 +610,25 @@ private fun StorageRow(
             if (selectionActive) Checkbox(checked = selected, onCheckedChange = { onSelect() })
         }
     }
+}
+
+private fun externalStorageDocumentUriForPath(path: String): Uri? {
+    val normalized = path.replace('\\', '/').trimEnd('/')
+    if (!normalized.startsWith("/storage/")) return null
+    val rest = normalized.removePrefix("/storage/")
+    val volume = rest.substringBefore('/')
+    val relative = rest.substringAfter('/', "")
+    val documentVolume = if (volume.equals("emulated", ignoreCase = true)) {
+        // /storage/emulated/0/... is Android's primary shared storage.
+        if (relative == "0") return DocumentsContract.buildDocumentUri(
+            "com.android.externalstorage.documents", "primary:"
+        )
+        if (!relative.startsWith("0/")) return null
+        "primary"
+    } else volume
+    val documentRelative = if (volume.equals("emulated", ignoreCase = true)) relative.removePrefix("0/") else relative
+    val documentId = "$documentVolume:$documentRelative"
+    return DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", documentId)
 }
 
 @Composable

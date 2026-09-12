@@ -28,6 +28,11 @@ data class SpaceTraceUiState(
     val sortMode: SortMode = SortMode.SIZE_DESC,
     val selected: Set<Uri> = emptySet(),
     val deleting: Boolean = false,
+    val searchQuery: String = "",
+    val scanStartedAtMs: Long = 0L,
+    val lastScanDurationMs: Long = 0L,
+    val lastScanFiles: Int = 0,
+    val lastScanFolders: Int = 0,
     val message: String? = null
 )
 
@@ -73,7 +78,10 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
     private fun scan(locations: List<StorageLocation>) {
         scanJob?.cancel()
         scanJob = viewModelScope.launch {
-            _uiState.update { it.copy(scanStarted = true, scanning = true, progress = ScanProgress(), selected = emptySet()) }
+            val capacitiesAtStart = locations.mapNotNull(repository::capacityFor)
+            val capacityAtStart = StorageCapacity(capacitiesAtStart.sumOf { it.totalBytes }, capacitiesAtStart.sumOf { it.freeBytes })
+            val startedAt = System.currentTimeMillis()
+            _uiState.update { it.copy(scanStarted = true, scanning = true, progress = ScanProgress(), selected = emptySet(), searchQuery = "", capacity = capacityAtStart, scanStartedAtMs = startedAt) }
             runCatching {
                 val roots = mutableListOf<StorageNode>()
                 var filesBefore = 0
@@ -111,7 +119,7 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
                 val capacities = locations.mapNotNull(repository::capacityFor)
                 root to StorageCapacity(capacities.sumOf { it.totalBytes }, capacities.sumOf { it.freeBytes })
             }.onSuccess { (root, capacity) ->
-                _uiState.update { it.copy(root = root, currentFolderUri = root.uri, pathStack = listOf(root.uri), capacity = capacity, scanning = false) }
+                _uiState.update { state -> state.copy(root = root, currentFolderUri = root.uri, pathStack = listOf(root.uri), capacity = capacity, scanning = false, lastScanDurationMs = (System.currentTimeMillis() - state.scanStartedAtMs).coerceAtLeast(0L), lastScanFiles = state.progress.filesVisited, lastScanFolders = state.progress.foldersVisited) }
             }.onFailure { error ->
                 if (error is kotlinx.coroutines.CancellationException) return@onFailure
                 _uiState.update { it.copy(scanning = false, message = error.message ?: "Scan failed.") }
@@ -122,6 +130,7 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
     fun cancelScan() { scanJob?.cancel(); _uiState.update { it.copy(scanning = false, message = "Scan cancelled.") } }
     fun setCategory(category: FileCategory) = _uiState.update { it.copy(category = category) }
     fun setSortMode(sortMode: SortMode) = _uiState.update { it.copy(sortMode = sortMode) }
+    fun setSearchQuery(query: String) = _uiState.update { it.copy(searchQuery = query) }
     fun showMessage(message: String) = _uiState.update { it.copy(message = message) }
 
     fun dismissMessage() = _uiState.update { it.copy(message = null) }
@@ -152,7 +161,8 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
                 scanning = false,
                 progress = ScanProgress(),
                 selected = emptySet(),
-                deleting = false
+                deleting = false,
+                searchQuery = ""
             )
         }
     }
@@ -176,6 +186,22 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
             SortMode.NAME_ASC -> filtered.sortedBy { it.name.lowercase() }
             SortMode.MODIFIED_DESC -> filtered.sortedByDescending { it.lastModified }
         }
+    }
+
+
+    fun searchResults(): List<StorageNode> {
+        val query = _uiState.value.searchQuery.trim()
+        if (query.isBlank()) return emptyList()
+        val start = currentFolder() ?: return emptyList()
+        val results = mutableListOf<StorageNode>()
+        fun visit(node: StorageNode) {
+            node.children.forEach { child ->
+                if (child.name.contains(query, ignoreCase = true) || child.displayPath.contains(query, ignoreCase = true) || (!child.isDirectory && child.category.label.contains(query, ignoreCase = true))) results += child
+                if (child.isDirectory) visit(child)
+            }
+        }
+        visit(start)
+        return results.sortedByDescending { it.totalSizeBytes }.take(500)
     }
 
     fun selectedNodes(): List<StorageNode> = _uiState.value.selected.mapNotNull { findNode(_uiState.value.root, it) }

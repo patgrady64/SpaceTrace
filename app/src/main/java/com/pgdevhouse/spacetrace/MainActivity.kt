@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -40,6 +41,8 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -50,6 +53,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.core.content.FileProvider
 import java.io.File
 import java.text.DateFormat
@@ -70,6 +74,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.sp
 import com.pgdevhouse.spacetrace.model.FileCategory
 import com.pgdevhouse.spacetrace.model.SortMode
 import com.pgdevhouse.spacetrace.model.StorageLocation
@@ -91,13 +96,18 @@ class MainActivity : ComponentActivity() {
 }
 
 private val colors = darkColorScheme(
-    primary = Color(0xFFFF5252),
-    onPrimary = Color(0xFF2B0000),
-    background = Color(0xFF121010),
-    surface = Color(0xFF1D1818),
-    surfaceVariant = Color(0xFF2A2020),
-    onBackground = Color(0xFFF5EAEA),
-    onSurface = Color(0xFFF5EAEA)
+    primary = Color(0xFFE5484D),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF5C2023),
+    onPrimaryContainer = Color(0xFFFFDADB),
+    background = Color(0xFF0D0E10),
+    surface = Color(0xFF15171A),
+    surfaceVariant = Color(0xFF202328),
+    onBackground = Color(0xFFF2F3F5),
+    onSurface = Color(0xFFF2F3F5),
+    onSurfaceVariant = Color(0xFFB8BDC7),
+    outline = Color(0xFF363A41),
+    error = Color(0xFFFF6B6B)
 )
 
 @Composable
@@ -120,16 +130,24 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
         val folderPath = if (node.isDirectory) node.displayPath else node.displayPath.substringBeforeLast('/', node.displayPath)
         val folderUri = externalStorageDocumentUriForPath(folderPath)
         if (folderUri == null) {
-            viewModel.showMessage("This location cannot be opened by an Android file manager.")
+            viewModel.showMessage("This folder cannot be mapped to Android Files.")
         } else {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
+            val baseIntent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(folderUri, DocumentsContract.Document.MIME_TYPE_DIR)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             }
-            runCatching {
-                context.startActivity(Intent.createChooser(intent, "Open folder with"))
-            }.onFailure {
-                viewModel.showMessage("No installed file manager can browse this folder.")
+            // Android has no public universal "browse this folder" intent. Try the two
+            // common DocumentsUI package names first, then any third-party file manager.
+            val candidates = listOf("com.google.android.documentsui", "com.android.documentsui")
+            val launched = candidates.any { packageName ->
+                runCatching {
+                    context.startActivity(Intent(baseIntent).setPackage(packageName))
+                    true
+                }.getOrDefault(false)
+            }
+            if (!launched) {
+                runCatching { context.startActivity(Intent.createChooser(baseIntent, "Open folder with")) }
+                    .onFailure { viewModel.showMessage("No installed file manager can browse this folder. Use Show folder in SpaceTrace instead.") }
             }
         }
     }
@@ -186,16 +204,22 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
             modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 12.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
-                    Text("SpaceTrace", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    Text("Find the files behind the number", color = MaterialTheme.colorScheme.primary)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier.size(38.dp).background(MaterialTheme.colorScheme.primary, RoundedCornerShape(11.dp)),
+                        contentAlignment = Alignment.Center
+                    ) { Text("S", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Black, fontSize = 20.sp) }
+                    Column(Modifier.padding(start = 11.dp)) {
+                        Text("SpaceTrace", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text("Storage, explained.", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
                 if (state.permissionGranted && state.scanStarted && !state.scanning) {
-                    OutlinedButton(onClick = { viewModel.rescan() }) { Text("Rescan") }
+                    OutlinedButton(onClick = { viewModel.rescan() }, shape = RoundedCornerShape(10.dp)) { Text("Rescan") }
                 }
             }
 
@@ -216,20 +240,39 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
                     folders = state.progress.foldersVisited,
                     bytes = state.progress.bytesFound,
                     path = state.progress.currentPath,
+                    startedAtMs = state.scanStartedAtMs,
+                    expectedUsedBytes = state.capacity?.usedBytes,
                     onCancel = viewModel::cancelScan
                 )
             } else {
                 state.root?.let { root ->
                     CapacityCard(root, state.capacity?.totalBytes, state.capacity?.freeBytes)
                     Spacer(Modifier.height(10.dp))
-                    Text(
-                        viewModel.currentFolder()?.displayPath.orEmpty(),
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
+                    Surface(
+                        color = MaterialTheme.colorScheme.surface,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            viewModel.currentFolder()?.displayPath.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)
+                        )
+                    }
+                    ScanSummary(state.lastScanFiles, state.lastScanFolders, root.totalSizeBytes, state.lastScanDurationMs)
+                    OutlinedTextField(
+                        value = state.searchQuery,
+                        onValueChange = viewModel::setSearchQuery,
+                        label = { Text("Search scanned files") },
+                        placeholder = { Text("FLAC, backup, IMG_, video…") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                     )
                     ViewModeRow(showTreemap = showTreemap, onChange = { showTreemap = it })
-                    if (!showTreemap) {
+                    if (!showTreemap && state.searchQuery.isBlank()) {
                         FilterRow(state.category, viewModel::setCategory)
                         SortRow(state.sortMode, viewModel::setSortMode)
                     }
@@ -243,13 +286,22 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
                         )
                     }
 
-                    if (showTreemap) {
+                    if (state.searchQuery.isNotBlank()) {
+                        SectionHeader("SEARCH RESULTS")
+                        val results = viewModel.searchResults()
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
+                            items(results, key = { it.uri.toString() }) { node ->
+                                StorageRow(node, false, false, onOpen = { if (node.isDirectory) viewModel.openFolder(node.uri) else treemapDetails = node }, onSelect = { fileManagerNode = node })
+                            }
+                            if (results.isEmpty()) item { Text("No scanned items match this search.", modifier = Modifier.padding(vertical = 20.dp)) }
+                        }
+                    } else if (showTreemap) {
                         if (state.pathStack.size > 1) {
                             OutlinedButton(onClick = { viewModel.navigateUp() }, modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
-                                Text("← Parent folder")
+                                Text("‹  Parent folder")
                             }
                         }
-                        Text("Folders", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 6.dp))
+                        SectionHeader("FOLDERS")
                         val folders = viewModel.heatmapFolders()
                         if (folders.isEmpty()) {
                             Text("No subfolders", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 12.dp))
@@ -262,7 +314,7 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
                             )
                         }
                         Spacer(Modifier.height(10.dp))
-                        Text("Files in this folder", fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 6.dp))
+                        SectionHeader("FILES IN THIS FOLDER")
                         val files = viewModel.currentFiles()
                         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
                             items(files, key = { it.uri.toString() }) { node ->
@@ -280,7 +332,7 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
                         val visible = viewModel.visibleChildren()
                         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (state.pathStack.size > 1) {
-                                item { OutlinedButton(onClick = { viewModel.navigateUp() }, modifier = Modifier.fillMaxWidth()) { Text("← Parent folder") } }
+                                item { OutlinedButton(onClick = { viewModel.navigateUp() }, modifier = Modifier.fillMaxWidth()) { Text("‹  Parent folder") } }
                             }
                             items(visible, key = { it.uri.toString() }) { node ->
                                 StorageRow(
@@ -312,6 +364,7 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
                         TextButton(onClick = { fileManagerNode = null; deleteNode = node }) { Text("Delete folder") }
                     } else {
                         TextButton(onClick = { fileManagerNode = null; openFile(node) }) { Text("Open file") }
+                        TextButton(onClick = { fileManagerNode = null; openInFileManager(node) }) { Text("Open containing folder") }
                         TextButton(onClick = { fileManagerNode = null; viewModel.showContainingFolder(node) }) { Text("Show folder in SpaceTrace") }
                         TextButton(onClick = { fileManagerNode = null; deleteNode = node }) { Text("Delete file") }
                     }
@@ -456,26 +509,29 @@ private fun StorageSelectionState(
 ) {
     val internal = locations.firstOrNull { !it.removable }
     val sd = locations.firstOrNull { it.removable }
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Column(Modifier.fillMaxWidth().padding(24.dp)) {
-                Text("What do you want to scan?", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Text("Choose one or both storage locations.", style = MaterialTheme.typography.bodySmall)
-                Spacer(Modifier.height(16.dp))
-                StorageChoice("Internal storage", "Photos, downloads and other accessible files", internal, selectedPaths, onToggle)
-                Spacer(Modifier.height(8.dp))
-                StorageChoice("SD card", if (sd == null) "Not detected" else sd.name, sd, selectedPaths, onToggle)
-                Spacer(Modifier.height(18.dp))
-                Button(
-                    onClick = { if (permissionGranted) onStart() else onGrant() },
-                    enabled = selectedPaths.isNotEmpty(),
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text(if (permissionGranted) "Start scan" else "Grant access & continue") }
-                if (!permissionGranted) {
-                    Text("Android requires Manage all files access before SpaceTrace can scan the selected storage.", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 8.dp))
-                }
-            }
+    Column(
+        Modifier.fillMaxSize().padding(top = 34.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("Choose storage", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("Select one or both locations to analyze.", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 5.dp, bottom = 24.dp))
+        StorageChoice("Internal storage", "Photos, downloads and shared files", internal, selectedPaths, onToggle)
+        Spacer(Modifier.height(10.dp))
+        StorageChoice("SD card", if (sd == null) "Not detected" else sd.name, sd, selectedPaths, onToggle)
+        Spacer(Modifier.height(20.dp))
+        Button(
+            onClick = { if (permissionGranted) onStart() else onGrant() },
+            enabled = selectedPaths.isNotEmpty(),
+            modifier = Modifier.fillMaxWidth().height(50.dp),
+            shape = RoundedCornerShape(12.dp)
+        ) { Text(if (permissionGranted) "Scan selected storage" else "Grant access & continue", fontWeight = FontWeight.SemiBold) }
+        if (!permissionGranted) {
+            Text(
+                "SpaceTrace needs Android's all-files access to measure storage accurately.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 12.dp, start = 8.dp, end = 8.dp)
+            )
         }
     }
 }
@@ -488,15 +544,27 @@ private fun StorageChoice(
     selectedPaths: Set<String>,
     onToggle: (StorageLocation) -> Unit
 ) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(
-            checked = location?.path in selectedPaths,
-            onCheckedChange = { if (location != null) onToggle(location) },
-            enabled = location != null
+    val selected = location?.path in selectedPaths
+    Surface(
+        color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .65f) else MaterialTheme.colorScheme.outline),
+        modifier = Modifier.fillMaxWidth().combinedClickable(
+            enabled = location != null,
+            onClick = { if (location != null) onToggle(location) },
+            onLongClick = {}
         )
-        Column(Modifier.padding(start = 8.dp)) {
-            Text(title, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = if (location == null) MaterialTheme.colorScheme.onSurface.copy(alpha = .55f) else MaterialTheme.colorScheme.onSurface)
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(38.dp).background(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center
+            ) { Text(if (location?.removable == true) "SD" else "IN", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium) }
+            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text(title, fontWeight = FontWeight.SemiBold)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Checkbox(checked = selected, onCheckedChange = { if (location != null) onToggle(location) }, enabled = location != null)
         }
     }
 }
@@ -537,14 +605,25 @@ private fun LocationRow(
 }
 
 @Composable
-private fun ScanState(files: Int, folders: Int, bytes: Long, path: String, onCancel: () -> Unit) {
+private fun ScanState(files: Int, folders: Int, bytes: Long, path: String, startedAtMs: Long, expectedUsedBytes: Long?, onCancel: () -> Unit) {
+    val elapsedMs = (System.currentTimeMillis() - startedAtMs).coerceAtLeast(1L)
+    val progress = if (expectedUsedBytes != null && expectedUsedBytes > 0) (bytes.toFloat() / expectedUsedBytes).coerceIn(0f, .99f) else null
+    val rate = bytes.toDouble() / (elapsedMs / 1000.0)
+    val etaSeconds = if (progress != null && elapsedMs >= 3000 && rate > 0 && expectedUsedBytes!! > bytes) ((expectedUsedBytes - bytes) / rate).toLong() else null
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
             CircularProgressIndicator()
             Spacer(Modifier.height(16.dp))
             Text("Tracing storage…", fontWeight = FontWeight.Bold)
             Text("$files files • $folders folders • ${bytes.formatBytes()}")
-            Text(path, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+            if (progress != null) {
+                Spacer(Modifier.height(10.dp))
+                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                Text("~${(progress * 100).toInt()}% analyzed", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (etaSeconds != null) Text("About ${formatDuration(etaSeconds * 1000)} remaining", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 6.dp))
+            else Text("Estimating time remaining…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
+            Text(path, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
             Spacer(Modifier.height(12.dp))
             TextButton(onClick = onCancel) { Text("Cancel scan") }
         }
@@ -552,14 +631,51 @@ private fun ScanState(files: Int, folders: Int, bytes: Long, path: String, onCan
 }
 
 @Composable
+private fun ScanSummary(files: Int, folders: Int, bytes: Long, durationMs: Long) {
+    if (durationMs <= 0L) return
+    Text(
+        "${bytes.formatBytes()} scanned • ${formatNumber(files.toLong())} files • ${formatNumber(folders.toLong())} folders • ${formatDuration(durationMs)}",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 7.dp)
+    )
+}
+
+private fun formatDuration(ms: Long): String {
+    val seconds = (ms / 1000).coerceAtLeast(0)
+    return when {
+        seconds < 60 -> "${seconds}s"
+        seconds < 3600 -> "${seconds / 60}m ${seconds % 60}s"
+        else -> "${seconds / 3600}h ${(seconds % 3600) / 60}m"
+    }
+}
+
+@Composable
 private fun CapacityCard(root: StorageNode, total: Long?, free: Long?) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        Column(Modifier.fillMaxWidth().padding(14.dp)) {
-            Text(root.name, fontWeight = FontWeight.Bold)
-            if (total != null && free != null) {
-                Text("${(total - free).coerceAtLeast(0L).formatBytes()} used • ${free.formatBytes()} free • ${total.formatBytes()} total")
+    val used = if (total != null && free != null) (total - free).coerceAtLeast(0L) else null
+    val ratio = if (used != null && total != null && total > 0L) (used.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(15.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column {
+                    Text(root.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                    Text("${root.totalSizeBytes.formatBytes()} accessible files scanned", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (used != null) Text(used.formatBytes(), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             }
-            Text("${root.totalSizeBytes.formatBytes()} accessible files scanned", style = MaterialTheme.typography.bodySmall)
+            if (total != null && free != null) {
+                Spacer(Modifier.height(12.dp))
+                LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth().height(6.dp), trackColor = MaterialTheme.colorScheme.surfaceVariant)
+                Row(Modifier.fillMaxWidth().padding(top = 7.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("${free.formatBytes()} free", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${total.formatBytes()} total", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
     }
 }
@@ -576,13 +692,16 @@ private fun FilterRow(selected: FileCategory, onSelected: (FileCategory) -> Unit
 @Composable
 private fun ViewModeRow(showTreemap: Boolean, onChange: (Boolean) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(bottom = 8.dp),
-        horizontalArrangement = Arrangement.End
+        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically
     ) {
+        Text(if (showTreemap) "Heatmap visible" else "Heatmap hidden", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(8.dp))
         FilterChip(
             selected = showTreemap,
             onClick = { onChange(!showTreemap) },
-            label = { Text(if (showTreemap) "Hide heatmap" else "Show heatmap") }
+            label = { Text(if (showTreemap) "Hide" else "Show") }
         )
     }
 }
@@ -635,15 +754,10 @@ private fun TreemapView(
             treemapRects(nodes, maxWidth.value, maxHeight.value)
         }
         rects.forEachIndexed { index, rect ->
-            val shade = when (index % 4) {
-                0 -> MaterialTheme.colorScheme.primary.copy(alpha = .80f)
-                1 -> MaterialTheme.colorScheme.primary.copy(alpha = .62f)
-                2 -> MaterialTheme.colorScheme.primary.copy(alpha = .46f)
-                else -> MaterialTheme.colorScheme.primary.copy(alpha = .32f)
-            }
+            val shade = folderCategoryColor(rect.node)
             Surface(
                 color = shade,
-                shape = RoundedCornerShape(3.dp),
+                shape = RoundedCornerShape(7.dp),
                 modifier = Modifier
                     .offset(x = rect.x.dp, y = rect.y.dp)
                     .width(rect.width.dp.coerceAtLeast(1.dp))
@@ -660,7 +774,40 @@ private fun TreemapView(
             }
         }
     }
-    Text("Block area represents folder size • Tap a folder to drill down", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 6.dp))
+    Text("Block size = storage used • Color = dominant file type • Tap to drill down", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 7.dp, bottom = 3.dp))
+    Text("● Audio   ● Video   ● Images   ● Apps   ● Docs   ● Archives   ● Mixed", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+private fun folderCategoryColor(node: StorageNode): Color {
+    val bytes = mutableMapOf<FileCategory, Long>()
+    fun collect(n: StorageNode) {
+        if (n.isDirectory) n.children.forEach(::collect) else bytes[n.category] = (bytes[n.category] ?: 0L) + n.totalSizeBytes
+    }
+    collect(node)
+    val total = bytes.values.sum()
+    val dominant = bytes.maxByOrNull { it.value }
+    val category = if (dominant != null && total > 0 && dominant.value.toDouble() / total >= .70) dominant.key else FileCategory.OTHER
+    return when (category) {
+        FileCategory.AUDIO -> Color(0xFF3976D6)
+        FileCategory.VIDEO -> Color(0xFFE07A32)
+        FileCategory.IMAGE -> Color(0xFF8B5BD6)
+        FileCategory.APK -> Color(0xFF3A9B63)
+        FileCategory.DOCUMENT -> Color(0xFFD3A52D)
+        FileCategory.ARCHIVE -> Color(0xFF2A9AA0)
+        else -> Color(0xFF555B66)
+    }
+}
+
+@Composable
+private fun SectionHeader(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        letterSpacing = 0.8.sp,
+        modifier = Modifier.padding(top = 2.dp, bottom = 7.dp)
+    )
 }
 
 @Composable
@@ -683,19 +830,22 @@ private fun StorageRow(
 ) {
     Surface(
         color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .17f) else MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(10.dp),
         modifier = Modifier.fillMaxWidth().combinedClickable(onClick = {
             if (selectionActive) onSelect() else onOpen()
         }, onLongClick = onSelect)
     ) {
-        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (node.isDirectory) "▣" else "▪", color = MaterialTheme.colorScheme.primary)
-            Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(34.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(9.dp)),
+                contentAlignment = Alignment.Center
+            ) { Text(if (node.isDirectory) "D" else "F", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium) }
+            Column(Modifier.weight(1f).padding(horizontal = 11.dp)) {
                 Text(node.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(node.displayPath, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(if (node.isDirectory) node.directContentsLabel else node.category.label, style = MaterialTheme.typography.labelSmall)
+                Text(if (node.isDirectory) node.directContentsLabel else node.category.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(node.displayPath, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Text(node.totalSizeBytes.formatBytes(), fontWeight = FontWeight.Bold)
+            Text(node.totalSizeBytes.formatBytes(), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
             if (selectionActive) Checkbox(checked = selected, onCheckedChange = { onSelect() })
         }
     }

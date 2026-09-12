@@ -50,6 +50,11 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.core.content.FileProvider
+import java.io.File
+import java.text.DateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -109,34 +114,37 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
     var showTreemap by remember { mutableStateOf(true) }
     var treemapDetails by remember { mutableStateOf<StorageNode?>(null) }
     var fileManagerNode by remember { mutableStateOf<StorageNode?>(null) }
+    var deleteNode by remember { mutableStateOf<StorageNode?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val openInFileManager: (StorageNode) -> Unit = { node ->
-        val folderPath = if (node.isDirectory) {
-            node.displayPath
-        } else {
-            node.displayPath.substringBeforeLast('/', node.displayPath)
-        }
+        val folderPath = if (node.isDirectory) node.displayPath else node.displayPath.substringBeforeLast('/', node.displayPath)
         val folderUri = externalStorageDocumentUriForPath(folderPath)
         if (folderUri == null) {
             viewModel.showMessage("This location cannot be opened by an Android file manager.")
         } else {
-            // ACTION_OPEN_DOCUMENT_TREE is the Android-supported way to open a folder location.
-            // EXTRA_INITIAL_URI asks the selected DocumentsUI/file-provider implementation to
-            // start at the folder instead of silently falling back to SpaceTrace's Details dialog.
-            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                putExtra(DocumentsContract.EXTRA_INITIAL_URI, folderUri)
-                addFlags(
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
-                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
-                )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(folderUri, DocumentsContract.Document.MIME_TYPE_DIR)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             }
             runCatching {
-                context.startActivity(Intent.createChooser(intent, "Open in file manager"))
+                context.startActivity(Intent.createChooser(intent, "Open folder with"))
             }.onFailure {
-                viewModel.showMessage("No compatible file manager was found.")
+                viewModel.showMessage("No installed file manager can browse this folder.")
             }
+        }
+    }
+    val openFile: (StorageNode) -> Unit = { node ->
+        val file = File(node.displayPath)
+        runCatching {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            val mime = node.mimeType ?: context.contentResolver.getType(uri) ?: "*/*"
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(intent, "Open file with"))
+        }.onFailure {
+            viewModel.showMessage("No installed app can open this file.")
         }
     }
     val settingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -297,17 +305,41 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
             onDismissRequest = { fileManagerNode = null },
             title = { Text(node.name) },
             text = {
-                Text(if (node.isDirectory) "Folder actions" else "File actions")
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    fileManagerNode = null
-                    openInFileManager(node)
-                }) {
-                    Text(if (node.isDirectory) "Open in file manager" else "Open containing folder")
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    if (node.isDirectory) {
+                        TextButton(onClick = { fileManagerNode = null; viewModel.openFolder(node.uri) }) { Text("Open in SpaceTrace") }
+                        TextButton(onClick = { fileManagerNode = null; openInFileManager(node) }) { Text("Open in file manager") }
+                        TextButton(onClick = { fileManagerNode = null; deleteNode = node }) { Text("Delete folder") }
+                    } else {
+                        TextButton(onClick = { fileManagerNode = null; openFile(node) }) { Text("Open file") }
+                        TextButton(onClick = { fileManagerNode = null; viewModel.showContainingFolder(node) }) { Text("Show folder in SpaceTrace") }
+                        TextButton(onClick = { fileManagerNode = null; deleteNode = node }) { Text("Delete file") }
+                    }
+                    TextButton(onClick = { fileManagerNode = null; treemapDetails = node }) { Text("Details") }
                 }
             },
+            confirmButton = {},
             dismissButton = { TextButton(onClick = { fileManagerNode = null }) { Text("Cancel") } }
+        )
+    }
+
+    deleteNode?.let { node ->
+        AlertDialog(
+            onDismissRequest = { deleteNode = null },
+            title = { Text(if (node.isDirectory) "Delete folder?" else "Delete file?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(node.name, fontWeight = FontWeight.Bold)
+                    Text(node.totalSizeBytes.formatBytes())
+                    if (node.isDirectory) Text("This permanently deletes the folder and everything inside it (${node.directContentsLabel}).")
+                    else Text("This file may not be recoverable after deletion.")
+                    Text(node.displayPath, style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                Button(onClick = { deleteNode = null; viewModel.deleteNode(node) }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { deleteNode = null }) { Text("Cancel") } }
         )
     }
 
@@ -316,10 +348,29 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
             onDismissRequest = { treemapDetails = null },
             title = { Text(node.name) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(node.totalSizeBytes.formatBytes(), fontWeight = FontWeight.Bold)
-                    Text(node.category.label)
-                    Text(node.displayPath, style = MaterialTheme.typography.bodySmall)
+                val parentSize = findParentSize(state.root, node.uri)
+                val percentOfParent = if (parentSize != null && parentSize > 0L) node.totalSizeBytes * 100.0 / parentSize else null
+                val recursive = recursiveCounts(node)
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    DetailLine("Type", if (node.isDirectory) "Folder" else node.category.label.removeSuffix("s"))
+                    DetailLine("Size", "${node.totalSizeBytes.formatBytes()} (${formatNumber(node.totalSizeBytes)} bytes)")
+                    if (!node.isDirectory && node.ownSizeBytes != node.totalSizeBytes)
+                        DetailLine("File size", "${node.ownSizeBytes.formatBytes()} (${formatNumber(node.ownSizeBytes)} bytes)")
+                    if (percentOfParent != null) DetailLine("Share of parent", "%.2f%%".format(percentOfParent))
+                    if (node.isDirectory) {
+                        DetailLine("Direct contents", node.directContentsLabel)
+                        DetailLine("Total contents", "${recursive.first} ${if (recursive.first == 1) "file" else "files"} • ${recursive.second} ${if (recursive.second == 1) "folder" else "folders"}")
+                    } else {
+                        val extension = node.name.substringAfterLast('.', "").ifBlank { "None" }
+                        DetailLine("Extension", if (extension == "None") extension else ".${extension.lowercase()}")
+                        DetailLine("MIME type", node.mimeType ?: "Unknown")
+                    }
+                    DetailLine("Modified", formatTimestamp(node.lastModified))
+                    DetailLine("Name", node.name)
+                    DetailLine("Path", node.displayPath)
+                    DetailLine("URI", node.uri.toString())
+                    DetailLine("Readable", if (File(node.displayPath).canRead()) "Yes" else "No")
+                    DetailLine("Writable", if (File(node.displayPath).canWrite()) "Yes" else "No")
                 }
             },
             confirmButton = { TextButton(onClick = { treemapDetails = null }) { Text("Close") } }
@@ -353,6 +404,44 @@ private fun SpaceTraceApp(viewModel: SpaceTraceViewModel) {
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } }
         )
+    }
+}
+
+private fun recursiveCounts(node: StorageNode): Pair<Int, Int> {
+    var files = 0
+    var folders = 0
+    node.children.forEach { child ->
+        if (child.isDirectory) {
+            folders++
+            val nested = recursiveCounts(child)
+            files += nested.first
+            folders += nested.second
+        } else files++
+    }
+    return files to folders
+}
+
+private fun findParentSize(root: StorageNode?, target: Uri): Long? {
+    if (root == null) return null
+    if (root.children.any { it.uri == target }) return root.totalSizeBytes
+    root.children.filter { it.isDirectory }.forEach { child ->
+        findParentSize(child, target)?.let { return it }
+    }
+    return null
+}
+
+private fun formatTimestamp(value: Long): String {
+    if (value <= 0L) return "Unknown"
+    return DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM).format(Date(value))
+}
+
+private fun formatNumber(value: Long): String = String.format(Locale.getDefault(), "%,d", value)
+
+@Composable
+private fun DetailLine(label: String, value: String) {
+    Column {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+        Text(value, style = MaterialTheme.typography.bodySmall)
     }
 }
 

@@ -157,6 +157,13 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
     fun currentFolder(): StorageNode? = findNode(_uiState.value.root, _uiState.value.currentFolderUri)
+
+    fun showContainingFolder(node: StorageNode) {
+        val root = _uiState.value.root ?: return
+        val parent = findParent(root, node.uri) ?: return
+        val path = findPath(root, parent.uri) ?: listOf(root.uri, parent.uri).distinct()
+        _uiState.update { it.copy(currentFolderUri = parent.uri, pathStack = path, selected = emptySet()) }
+    }
     fun visibleChildren(): List<StorageNode> = sortAndFilter(currentFolder()?.children.orEmpty(), true)
     fun heatmapFolders(): List<StorageNode> = currentFolder()?.children.orEmpty().filter { it.isDirectory }.sortedByDescending { it.totalSizeBytes }
     fun currentFiles(): List<StorageNode> = sortAndFilter(currentFolder()?.children.orEmpty().filter { !it.isDirectory }, false)
@@ -172,6 +179,14 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun selectedNodes(): List<StorageNode> = _uiState.value.selected.mapNotNull { findNode(_uiState.value.root, it) }
+    fun deleteNode(node: StorageNode) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(deleting = true) }
+            val deleted = repository.delete(node.uri)
+            _uiState.update { it.copy(deleting = false, message = if (deleted) "Deleted ${node.name}." else "Could not delete ${node.name}.") }
+            if (deleted) rescan()
+        }
+    }
     fun deleteSelected() {
         val targets = _uiState.value.selected.toList(); if (targets.isEmpty()) return
         viewModelScope.launch {
@@ -181,6 +196,22 @@ class SpaceTraceViewModel(application: Application) : AndroidViewModel(applicati
             rescan()
         }
     }
+    private fun findParent(node: StorageNode, target: Uri): StorageNode? {
+        if (node.children.any { it.uri == target }) return node
+        node.children.filter { it.isDirectory }.forEach { child ->
+            findParent(child, target)?.let { return it }
+        }
+        return null
+    }
+
+    private fun findPath(node: StorageNode, target: Uri): List<Uri>? {
+        if (node.uri == target) return listOf(node.uri)
+        node.children.filter { it.isDirectory }.forEach { child ->
+            findPath(child, target)?.let { return listOf(node.uri) + it }
+        }
+        return null
+    }
+
     private fun findNode(node: StorageNode?, uri: Uri?): StorageNode? {
         if (node == null || uri == null) return null
         if (node.uri == uri) return node
